@@ -1,0 +1,135 @@
+!-------------------
+!
+!   Nucleus
+!
+!--------------------
+
+&nucleon_numbers
+Z= 94 A= 240 /
+
+&quantum_numbers
+K_n= 0 0 0 0 pi_n= 0 0 0 0 rank_n= 0 0 0 0
+K_p= 0 0 0 0 pi_p= 0 0 0 0 rank_p= 0 0 0 0
+fix_rank='n' /
+
+!----------------------------------------------------
+!
+!   Skyrme-HF+BCS with Coulomb exchange and blocking
+!
+!----------------------------------------------------
+
+&mean_field_interaction
+name='SIII' ! predefined parameter set (SIII, SkM*, SGII, SLy4, SLy5, SLyIII.0.8, SLyMR0, T24)
+                  ! or user defined ('user') in the file 'Skyrme_parameters'
+odd_terms='min'   ! odd_terms='all' or 'min' (only s^2 and j in Etot)
+h_odd_perturbative = .false. 
+h_tensor_perturbative = .false. /
+
+&residual_interaction_BCS
+name='DDDI' ! 'DDDI'
+window_lower_bound=6.0 window_upper_bound=6.0 window_diffuseness=0.2
+strength= -321  -376         ! 16.2 15.1 in rare-earths
+fit_pairing = 'no'     ! rmn: reduced moller-nix gap, no: no estimation of pairing strength
+eta=0.0 beta=1.0 rho_c=0.16/  !(parameters of density dependent delta force)
+                              ! V_\delta * [1 - eta*(rho/rho_c)^beta}
+
+&Coulomb_exchange
+Exact_treatment='n' / ! (Do you want to add an exact treatment of Coulomb exchange
+                      ! in a 2nd HF-BCS process ? type 'y' for yes or 'n' for no.)
+
+&blocking
+blocking_scheme = 'SCB' ! SCB: selfconsistent blocking, EFA: equal-filling approximation
+/
+
+!--------------------------------------------
+!
+!   Parity symmetry and constriants
+!
+!--------------------------------------------
+
+&symmetry
+parity=.true. /
+
+&constraints
+zcm= 0.0 C1= 0.5e+2 readj_zcm='n'
+Q20= 0.0 C2= 1.0e-3 readj_Q20='y'
+Q30= 0.0 C3= 0.0e-4 readj_Q30='n'
+Q40= 0.0 C4= 0.0e-1 readj_Q40='n'
+readj_count_max=2 readj_acceleration_factor=1.0 /
+
+!----------------------
+!
+! Numerical parameters
+!
+!----------------------
+
+&HO_basis_parameters
+N0=16   b=.480  q=1.00
+optimization = 'n' /
+
+&convergence_parameters
+broyden_method = 'n'
+tolerance = 1e-3
+Nitermax=100
+energy_precision= 1e-4
+Q20_precision= 1e-1
+mixing=0.25 /
+
+&integration_parameters
+NGz=30 NGr=15 /
+
+!----------------------
+!
+! Initial potential
+!
+!----------------------
+
+&initial_potential
+type="HF"
+beta1_WS=0.0
+beta2_WS=0.25
+beta3_WS=0.0
+beta4_WS=0.0
+beta5_WS=0.0
+beta6_WS=0.0 /
+
+!------------------------------
+!
+! Observables calculations
+!
+!------------------------------
+
+&observables_calculations
+single_particle_spectra=           'n' ! (1)
+spherical_expansion=               'n' ! (2)
+nuclear_shape=                     'n' ! (3)
+moment_of_inertia=                 'y' ! (4)
+magnetic_moment=                   'n' ! (5)
+sp_angular_momentum=               'n' ! (6)
+isospin_mixing=                    'n' ! (7)
+two_body_center_of_mass_correction='n' ! (8)
+spectroscopic_factors=             'n' ! (9)
+sp_sum_rules=                      'n' ! (10)
+charge_density=                    'n' ! (11)
+integral_currents=                 'n' ! (12)
+/
+
+!-------------------------------------
+!
+!  Debugging mode
+!
+!-------------------------------------
+
+&debug
+mode= 'low' /
+
+!-------------------------------------
+!
+!  WS_perturbation
+!
+!-------------------------------------
+
+&WS_perturbation
+WS_perturbative_calculation = 'n'
+/
+
