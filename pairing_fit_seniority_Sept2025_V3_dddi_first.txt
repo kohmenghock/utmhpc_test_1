@@ -1,0 +1,465 @@
+   !=====================================================================
+   !                SUBROUTINE FIT_SENIORITY
+   !---------------------------------------------------------------------
+   ! This subroutine is to determine the SENIORITY FORCE pairing strengths
+   ! based on the average pair condensation energy obtained using
+   ! DELTA force pairing.
+   !=====================================================================
+
+   subroutine fit_seniority(nucleus, model, symmetries, HO_basis, &
+             numerical_parameters, HFfield, sp_states, densities)
+
+!
+!  Arguments
+!
+   type(nucleus_properties),intent(inout)       :: nucleus              ! Nucleus under study
+   type(modelization),intent(inout)             :: model                ! Model used (Skyrme and pairing)
+   type(symmetry_properties),intent(in) :: symmetries           ! Symmetries imposed to the solution
+   type(cylindrical_basis)                      :: HO_basis             ! HO expansion basis fo sp states
+   type(numeric)                                :: numerical_parameters ! Numerical parameters
+   type(field),dimension(2),intent(inout)       :: HFfield              ! One-body potential
+   type(local_density),dimension(2),intent(inout):: densities            ! Local densities (for n and p)
+   type(sp_state),dimension(:,:),allocatable,intent(inout):: sp_states            ! Single-particle states
+   type(operator),dimension(:),allocatable      :: Coul_exch              ! Exchange Coulomb field
+
+
+!
+!   Local variables
+!
+    character(len=28),parameter :: subroutinename='fit_seniority'
+    integer                     :: i,j,k,l,m,n, isospin,iter,array_size,iHF,jHF
+    integer,dimension(2)        :: Npart
+    real(kind=rk),dimension(2)  :: strength, keep_strength_dddi,max_ave_kHFB_sen,max_ave_kHFB_dddi, pair_gap_keep
+    real(kind=rk)               :: pairing_matrix
+    character(10)               :: mean_field, keep_model_pairing, blocking_keep
+    real(kind=rk)               :: target_Q20, target_Q40, Gn_keep, Gp_keep
+    real(kind=rk)               :: E_precision, Q20_precision, Nitermax_keep
+    real(kind=rk),dimension(:),allocatable :: density,ener_dens,ave_dens,g_HFB,ave_gHFB,ener_gHFB,k_HFB,ave_kHFB,k_HFB_sen
+    real(kind=rk),dimension(:),allocatable :: ave_sp_gap,ave_pair_gap,ave_pair_gap_old,ave_kHFB_old,ave_dens_old
+    real(kind=rk), parameter    :: gamma_coeff=1.2,delta_ener=0.01,epsilon=5.0*0.1*delta_ener
+    real(kind=rk)               :: gamma,e_fermi,integral,ener_min,ener_max,ave_gap
+    integer, parameter          :: order=2
+    real(kind=rk)               :: count
+    real(kind=rk)               :: test_strength,test_strength_1,test_strength_2,Epair_dddi_1,Epair_dddi_2
+    real(kind=rk),dimension(1:2):: pme_old, pme_new
+    real(kind=rk),dimension(2)  :: Fermi_energy, Epair_dddi
+    real(kind=rk)               :: ratio
+    logical                     :: return_fermi
+    real(kind=rk)               :: ave_pair, sum_ave_khfb
+
+    real(kind=rk)               :: mu, center, width, fj, fi
+    real(kind=rk)               :: Vpair_keep_1, Vpair_keep_2, V_incr, sum_tilde_k2, sum_ui2_vi2
+    integer,dimension(2,4)      :: i_odd
+    real(kind=rk)               :: Epair_sen_1, Epair_sen_2, seniority_strength, ovlp, tmp
+    real(kind=rk),dimension(HO_basis%size):: overlap
+    integer,dimension(HO_basis%size):: partner
+    type(expansion)             :: psi_bar
+    real                        :: sum_dens,diff_kHFB,diff_E,sum_n,diff_n,n_exact,kHFB_exact
+    real                        :: E_pairing_exact, E_pairing_ave, E_particle_exact, E_particle_ave, sum_ave_n
+    real                        :: E_total_exact, E_total_ave, E_total_exact_sum, E_total_ave_sum
+    real(kind=rk),dimension(:),allocatable:: ni, ave_n
+    integer                     :: nval
+
+
+   !
+   ! Check if the initial pairing mode is DDDI
+   !
+   if (model%pairing .ne. 'DDDI') then
+      write(out_unit,'(a90)') '========================================================================================='
+      write(out_unit,'(a90)') '     Error: fit of seniority force based on average pair condensation energy activated   '
+      write(out_unit,'(a90)') '     But initial pairing is not DDDI type                                                '
+      write(out_unit,'(a90)') '     Change pairing to DDDI                                                              '
+      write(out_unit,'(a90)') '========================================================================================='
+      stop
+   else
+      write(out_unit,'(a90)') '========================================================================================='
+
+      write(out_unit,'(a90)') '     ONE HFBCS CALCULATION USING DDDI STRENGTHS IN INPUT DATA FILE                       '
+      write(out_unit,'(a90)') '========================================================================================='
+   end if
+
+
+   !
+   ! Call cylindrical HO subroutine
+   !
+   if (symmetries%parity) then
+      call cyl_HO_basis(HO_basis, symmetries)
+      call memory_allocation(nucleus, model, HO_basis, HFfield, sp_states, densities)
+
+      if ((model%exact_coul_exch) .and. (model%fit_pairing .ne. 'no')) then
+         write(out_unit,*) 'This subroutine is not implemented for exact Coulomb'
+         stop
+      else
+         call initialize_potential(nucleus, model, HO_basis, HFfield, densities)
+      end if
+   else
+      call fatal(modulename,subroutinename,'This is limited to parity symmetric case for now')
+   end if
+
+
+   !
+   ! Estimate the average pair condensation energy from DDDI calculation
+   !
+
+   Epair_dddi(:) = 0.0
+   do isospin = 1, 2
+
+      !
+      ! Allocate arrays
+      !
+      if (allocated(ener_dens)) deallocate(ener_dens)
+      ener_min = sp_states(1,isospin)%energy - 15.0
+      ener_max = sp_states(HO_basis%size,isospin)%energy + 15.0
+      array_size = int((ener_max - ener_min)/delta_ener) + 1
+      allocate(ener_dens(array_size))
+
+      ener_dens(:) = 0.0
+      ener_dens(1) = ener_min
+      do i = 2,array_size
+         ener_dens(i) = ener_dens(i-1) + delta_ener
+      end do
+
+      if (allocated(density)) deallocate(density)
+      allocate(density(array_size))
+      density(:) = 0.0
+
+      if (allocated(ave_dens)) deallocate(ave_dens)
+      allocate(ave_dens(array_size))
+      ave_dens(:) = 0.0
+
+      if (allocated(k_HFB)) deallocate(k_HFB)
+      allocate(k_HFB(array_size))
+      k_HFB(:) = 0.0
+
+      if (allocated(ave_kHFB)) deallocate(ave_kHFB)
+      allocate(ave_kHFB(HO_basis%size))
+      ave_kHFB(:) = 0.0
+
+      if (allocated(ave_pair_gap)) deallocate(ave_pair_gap)
+      allocate(ave_pair_gap(HO_basis%size))
+      ave_pair_gap(:) = 0.0
+
+      !
+      !   Calculate the average level density using the Strutinsky energy averaging method
+      !
+      Npart(:)=(/ nucleus%N, nucleus%Z /)
+      gamma = gamma_coeff * 41.0/((Npart(1)+Npart(2))**(1.0/3.0))
+
+      !
+      ! Determine Fermi level from g_HFB
+      !
+      if (allocated(density)) deallocate(density)
+      allocate(density(array_size))
+      call evaluate_g_HFB(nucleus,sp_states,HO_basis,isospin,ener_dens,array_size,delta_ener,epsilon,density)
+
+
+      !
+      ! Determine Fermi level from average g_HFB
+      !
+      if (allocated(ave_dens)) deallocate(ave_dens)
+      allocate(ave_dens(array_size))
+      return_fermi = .true.
+      call ave_density(nucleus,model,HO_basis,sp_states,isospin,gamma,order,density,ener_dens,&
+             array_size,delta_ener,ave_dens,epsilon,e_fermi,return_fermi)
+
+      Fermi_energy(isospin) = e_fermi
+
+      write(out_unit,'(a33,i1,a3,f7.3,a4)') 'Fermi energy (DDDI) for isospin ', &
+                 isospin, ' = ', Fermi_energy(isospin), ' MeV'
+
+      !
+      ! Determine average k_HFB at discrete eigenenergy
+      !
+      k_HFB(:) = 0.0
+      ave_kHFB(:) = 0.0
+      return_fermi = .false.
+      call tilde_kHFB(nucleus,model,HO_basis,sp_states,isospin,gamma,order,&
+           k_HFB,ener_dens,array_size,delta_ener,ave_kHFB,epsilon,Fermi_energy(isospin),return_fermi)
+
+      !
+      !search for sp state with opposite Omega and largest overlap with psi_bar
+      !
+      partner(:) = 0
+      do iHF =1,HO_basis%size
+         if (sp_states(iHF,isospin)%Omega<0) cycle
+         !definition of time-reversed state
+         psi_bar=time_reversal(sp_states(iHF,isospin)%coef,HO_basis)
+         ovlp=1e-09_rk
+         do jHF=1,HO_basis%size
+            if (sp_states(jHF,isospin)%Omega /= -sp_states(iHF,isospin)%Omega .or. &
+                 sp_states(jHF,isospin)%pair_partner(isospin) /= 0) cycle ! In case partner already found
+            tmp=dot_product(sp_states(jHF,isospin)%coef%cylHO,psi_bar%cylHO)
+            if (abs(tmp)>abs(ovlp)) then
+               ovlp=tmp
+               partner(iHF)=jHF
+               overlap(iHF)=ovlp
+            end if
+         end do
+      end do
+
+      !
+      ! Call pairing matrix element subroutine
+      !
+      call pairing_matrix_elements(sp_states(:,isospin), densities, isospin, &
+           nucleus, model, HO_basis, nucleus%pairing(isospin)%Vpair(:,:), partner)
+
+      !
+      ! Calculate the average pairing gap
+      !
+      ave_pair_gap(:) = 0.0_rk
+                
+      do i = 1, HO_basis%size
+         do j = 1, HO_basis%size
+            ave_pair_gap(i) = ave_pair_gap(i)-0.50_rk*ave_kHFB(j)*nucleus%pairing(isospin)%Vpair(i,j)
+         end do
+      end do
+
+      !
+      ! Calculate the condensation energy using average gap and average k_HFB
+      !
+      do i = 1, HO_basis%size
+         if (sp_states(i,isospin)%omega<0) cycle
+         Epair_dddi(isospin) = Epair_dddi(isospin) + ave_kHFB(i)*ave_pair_gap(i)
+      end do
+
+      write(out_unit,'(a38,i1,a3,f8.3,a4)') 'Epair_condensation (DDDI) for isospin ', &
+                isospin,' = ', Epair_dddi(isospin), ' MeV'
+      write(out_unit,*)
+
+      !
+      ! Determine tilde_n for exact sp energies
+      !
+      if (allocated(ni)) deallocate(ni)
+      allocate(ni(array_size))
+
+      if (allocated(ave_n)) deallocate(ave_n)
+      allocate(ave_n(HO_basis%size))
+
+      ni(:) = 0.0_rk
+      ave_n(:) = 0.0_rk
+
+      call tilde_n(nucleus,model,HO_basis,sp_states,isospin,gamma,order,ni,ener_dens,ave_pair_gap,&
+                array_size,delta_ener,ave_n,epsilon,Fermi_energy(isospin))
+
+      !
+      ! Calculate average energy for exact sp energies
+      !
+      E_total_exact = 0.0_rk
+
+      do i = 1, HO_basis%size
+         if (sp_states(i,isospin)%omega<0) cycle
+         E_total_exact = E_total_exact + sp_states(i,isospin)%energy * ave_n(i) &
+                           - ave_pair_gap(i) * ave_kHFB(i)
+      end do
+
+      write(out_unit,*) 'Strutinsky: Total energy exact sp for isospin', isospin,' = ', E_total_exact
+
+      !
+      ! Sum up total average energy
+      !
+      E_total_exact_sum = E_total_exact_sum + E_total_exact
+
+   end do       !isospin loop
+
+   !
+   ! Perform one HF+BCS iteration with new occupation probabilities
+   !
+   numerical_parameters%convergence%Nitermax = 1
+   model%fit_pairing = 'rmn'
+   iter = 0
+   write(out_unit,*)
+   write(out_unit,*) '==============================================='
+   write(out_unit,*) '              HF+BCS WITH AVERAGE N            '
+   write(out_unit,*) '==============================================='
+
+   do l = 1, 1
+      do isospin = 1,2
+         !
+         ! Determine tilde_n for exact sp energies
+         !
+         if (allocated(ni)) deallocate(ni)
+         allocate(ni(array_size))
+
+         if (allocated(ave_n)) deallocate(ave_n)
+         allocate(ave_n(HO_basis%size))
+
+         ni(:) = 0.0_rk
+         ave_n(:) = 0.0_rk
+
+         call tilde_n(nucleus,model,HO_basis,sp_states,isospin,gamma,order,ni,ener_dens,ave_pair_gap,&
+                   array_size,delta_ener,ave_n,epsilon,Fermi_energy(isospin))
+
+         !
+         ! Replace occupation probabilities with ave_n
+         !
+         do i = 1, HO_basis%size
+            sp_states(i,isospin)%occupation = ave_n(i)
+         end do
+
+         !
+         ! Update one body densities
+         !
+         call local_one_body_densities(sp_states(:,isospin), HO_basis, densities(isospin), &
+               isospin, iter)
+
+      end do    !isospin loop
+
+      !
+      ! Update HF potential
+      !
+      call potential(nucleus, model, symmetries, HO_basis, numerical_parameters, &
+           HFfield, densities, model%exact_coul_exch)
+
+      !
+      ! Perform HF+BCS calculations with average n
+      !
+      call solve_HFBCS_equations(nucleus, model, symmetries, HO_basis, &
+        numerical_parameters, HFfield, sp_states, densities, iter, &
+         print_header_message=.true.)
+
+   end do !loop for HF+BCS using ave_n
+
+
+   do isospin = 1, 2
+      !
+      ! Determine tilde_n for new (average) sp energies
+      !
+      if (allocated(ni)) deallocate(ni)
+      allocate(ni(array_size))
+
+      if (allocated(ave_n)) deallocate(ave_n)
+      allocate(ave_n(HO_basis%size))
+
+      ni(:) = 0.0_rk
+      ave_n(:) = 0.0_rk
+
+      call tilde_n(nucleus,model,HO_basis,sp_states,isospin,gamma,order,ni,ener_dens,ave_pair_gap,&
+                array_size,delta_ener,ave_n,epsilon,Fermi_energy(isospin))
+
+      !
+      ! Determine tilde_kHFB for new (average) sp energies
+      !
+      k_HFB(:) = 0.0
+      ave_kHFB(:) = 0.0
+      return_fermi = .false.
+      call tilde_kHFB(nucleus,model,HO_basis,sp_states,isospin,gamma,order,&
+           k_HFB,ener_dens,array_size,delta_ener,ave_kHFB,epsilon,Fermi_energy(isospin),return_fermi)
+
+      !
+      ! Calculate average energy for new (average) sp energies
+      !
+      E_total_ave = 0.0_rk
+
+      do i = 1, HO_basis%size
+         if (sp_states(i,isospin)%omega<0) cycle
+         E_total_ave = E_total_ave + sp_states(i,isospin)%energy * ave_n(i) &
+                           - ave_pair_gap(i) * ave_kHFB(i)
+      end do
+
+      write(out_unit,*) 'Strutinsky: Total energy ave sp for isospin', isospin,' = ', E_total_ave
+
+      !
+      ! Sum up total average energy
+      !
+      E_total_ave_sum = E_total_ave_sum + E_total_ave
+
+   end do !isospin dddi
+
+   write(out_unit,*) 'Strutinsky: Total exact energy = ', E_total_exact_sum
+   write(out_unit,*) 'Strutinsky: Total average energy = ', E_total_ave_sum
+
+   write(out_unit,*)
+   write(out_unit,*) 'Strutinsky: Average Epair_cond dddi = ', Epair_dddi(1), Epair_dddi(2)
+
+
+
+   !====================================
+   ! CALCULATIONS FOR SENIORITY CASE
+   !====================================
+
+   !
+   ! Perform one HF+BCS iteration using the seniority force
+   !
+   model%pairing = 'seniority'
+   model%strength(:) = -19.0    !starting value for Gn and Gp
+   model%constraints(:)%readj = 'n'
+   model%constraints(:)%stiffness = 0.0_rk
+   numerical_parameters%convergence%Nitermax = 1
+   iter = 0
+   call solve_HFBCS_equations(nucleus, model, symmetries, HO_basis, &
+        numerical_parameters, HFfield, sp_states, densities, iter, &
+        print_header_message=.true.)
+
+   write(out_unit,*) '========================================='
+   write(out_unit,*) '======== COMPLETE HF+BCS ================'
+   write(out_unit,*) '========================================='
+
+   do isospin = 1, 2
+
+      !
+      ! Allocate ener_dens array
+      !
+      if (allocated(ener_dens)) deallocate(ener_dens)
+      ener_min = sp_states(1,isospin)%energy - 15.0
+      ener_max = sp_states(HO_basis%size,isospin)%energy + 15.0
+      array_size = int((ener_max - ener_min)/delta_ener) + 1
+      allocate(ener_dens(array_size))
+
+      ener_dens(:) = 0.0
+      ener_dens(1) = ener_min
+      do i = 2,array_size
+         ener_dens(i) = ener_dens(i-1) + delta_ener
+      end do
+
+      Npart(:)=(/ nucleus%N, nucleus%Z /)
+      gamma = gamma_coeff * 41.0/((Npart(1)+Npart(2))**(1.0/3.0))
+
+
+      do while (abs(Epair_dddi(isospin)-Epair_sen_2).gt.0.01)
+
+        Epair_sen_2 = (-1.0)*nucleus%pairing(isospin)%average_gap**2.0*(Npart(isospin) + 11.0)/model%strength(isospin)
+
+        ratio = Epair_dddi(isospin)-Epair_sen_2
+        model%strength(isospin) = model%strength(isospin)*(1.0+ratio*0.01)
+
+        write(out_unit,*)
+        write(out_unit,'(a48,i1)') 'Fitting seniority pairing strength for isospin ', isospin
+        write(out_unit,'(i2,3(f8.3,2x))') isospin, Epair_dddi(isospin), Epair_sen_2, model%strength(isospin)
+        write(out_unit,*)
+        print*, isospin, Epair_dddi(isospin), Epair_sen_2, model%strength(isospin)
+
+        !
+        ! Call pairing matrix element subroutine
+        !
+        call pairing_matrix_elements(sp_states(:,isospin), densities, isospin, &
+             nucleus, model, HO_basis, nucleus%pairing(isospin)%Vpair(:,:), partner)
+
+        !
+        ! Call BCS subroutine to compute the pairing gaps (needed to calculate k_HFB)
+        !
+        ! CAUTION!!!!!
+        ! Temporary set no blocked states
+        !
+        i_odd(isospin,:) = 0
+        numerical_parameters%convergence%Nitermax = 1
+
+        call BCS(nucleus, model, HO_basis, sp_states(:,isospin), nucleus%pairing(isospin)%Vpair(:,:), &
+                isospin, i_odd(isospin,:))
+
+     end do
+
+     write(out_unit,*) 'Epair_sen_2 = ', Epair_sen_2
+     write(out_unit,'(a35,i1,a3,f8.3,a4)') 'Seniority strength for isosopin ', &
+           isospin,' = ', model%strength(isospin),' MeV'
+     write(out_unit,*)
+
+   end do !isospin
+
+   
+   numerical_parameters%convergence%Nitermax = Nitermax_keep
+   call memory_deallocation(nucleus, model, HO_basis, HFfield, sp_states, densities)
+
+   stop 'Fit of seniority strength completed (without HF+BCS calculation)'
+
+
+   end subroutine fit_seniority
