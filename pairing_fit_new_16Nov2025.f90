@@ -110,7 +110,7 @@ contains
 !  IF PAIRING FORCE IS SENIORITY FORCE
 !
 
-!   if (model%pairing = 'seniority')
+!   if (model%pairing = 'seniority') then
       keep_model_pairing = model%pairing
       model%pairing = 'seniority'
    
